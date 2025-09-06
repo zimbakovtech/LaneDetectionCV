@@ -1,39 +1,15 @@
 import cv2
 import numpy as np
-import math
+from collections import deque
+from functions.region_of_interest import region_of_interest
+from functions.draw_lines import draw_lines
 
-def region_of_interest(img, vertices):
-    # Create a blank mask matching the image dimensions
-    mask = np.zeros_like(img)
-    # Determine mask color based on image channels
-    if len(img.shape) > 2:
-        channel_count = img.shape[2]
-        match_mask_color = (255,) * channel_count
-    else:
-        match_mask_color = 255
-    # Fill the polygon defined by vertices
-    cv2.fillPoly(mask, [vertices], match_mask_color)
-    # Return the image only in the masked region
-    return cv2.bitwise_and(img, mask)
+DRAW_Y_TOP_RATIO = 0.65
+DRAW_Y_BOTTOM_RATIO = 0.98  
 
-
-def draw_lines(img, lines, color=(0, 0, 255), thickness=5):
-    # Make a blank image to draw lines on
-    line_img = np.zeros_like(img)
-    if lines is None:
-        return img
-    # Draw each line segment
-    for x1, y1, x2, y2 in lines:
-        cv2.line(line_img, (x1, y1), (x2, y2), color, thickness)
-    # Overlay the lines on the original image
-    return cv2.addWeighted(img, 0.8, line_img, 1.0, 0.0)
-
-
-def pipeline(frame):
-    """
-    Process a video frame or image to detect and overlay lane lines.
-    """
+def detect(frame):
     height, width = frame.shape[:2]
+
     # Define a triangular region of interest
     vertices = np.array([
         (0, height),
@@ -43,12 +19,16 @@ def pipeline(frame):
 
     # 1. Convert to grayscale
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
     # 2. Apply Gaussian blur
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
     # 3. Perform Canny edge detection
     edges = cv2.Canny(blur, 100, 200)
+
     # 4. Mask edges image to region of interest
     masked = region_of_interest(edges, vertices)
+
     # 5. Run Hough transform to find line segments
     segments = cv2.HoughLinesP(
         masked,
@@ -80,29 +60,103 @@ def pipeline(frame):
                 right_y.extend([y1, y2])
 
     # 7. Fit a single line to each side using polyfit
-    y_max = height
-    y_min = int(height * 3 / 5)
+    # Use tighter vertical band so rendered lines are shorter and stay on-road
+    y_min = int(height * DRAW_Y_TOP_RATIO)
+    y_max = int(height * DRAW_Y_BOTTOM_RATIO)
+    # Safety: ensure ordering and bounds
+    y_min = max(0, min(height - 1, y_min))
+    y_max = max(0, min(height - 1, y_max))
+    if y_max <= y_min:
+        y_min = int(height * 0.70)
+        y_max = height - 1
     lines = []
+
+    left_line = None
+    right_line = None
 
     if left_x and left_y:
         left_fit = np.poly1d(np.polyfit(left_y, left_x, deg=1))
-        x_start = int(left_fit(y_max))
-        x_end = int(left_fit(y_min))
-        lines.append((x_start, y_max, x_end, y_min))
+        lx_bottom = int(left_fit(y_max))
+        lx_top = int(left_fit(y_min))
+        lx_bottom = max(0, min(width - 1, lx_bottom))
+        lx_top = max(0, min(width - 1, lx_top))
+        left_line = (lx_bottom, y_max, lx_top, y_min)
 
     if right_x and right_y:
         right_fit = np.poly1d(np.polyfit(right_y, right_x, deg=1))
-        x_start = int(right_fit(y_max))
-        x_end = int(right_fit(y_min))
-        lines.append((x_start, y_max, x_end, y_min))
+        rx_bottom = int(right_fit(y_max))
+        rx_top = int(right_fit(y_min))
+        rx_bottom = max(0, min(width - 1, rx_bottom))
+        rx_top = max(0, min(width - 1, rx_top))
+        right_line = (rx_bottom, y_max, rx_top, y_min)
+
+    # 7b. Impute missing lines using short-term history
+    left_line, right_line = _LANE_IMPUTER.update_and_impute(left_line, right_line, y_min, y_max, width)
+
+    if left_line is not None:
+        lines.append(left_line)
+    if right_line is not None:
+        lines.append(right_line)
 
     # 8. Draw the lane lines back onto the original frame
     output = draw_lines(frame, lines)
     return output
 
 
-def detect_lane(frame):
-    """
-    Alias for pipeline, for compatibility.
-    """
-    return pipeline(frame)
+class MissingLaneImputer:
+    def __init__(self, window: int = 12, max_gap: int = 6):
+        self.window = int(window)
+        self.max_gap = int(max_gap)
+        self.frame_idx = 0
+        self.left_hist: deque[tuple[int, int, int]] = deque(maxlen=self.window)
+        self.right_hist: deque[tuple[int, int, int]] = deque(maxlen=self.window)
+
+    def _predict(self, hist: deque, cur_idx: int):
+        if len(hist) == 0:
+            return None
+        
+        idxs = np.array([h[0] for h in hist], dtype=np.float32)
+        xb = np.array([h[1] for h in hist], dtype=np.float32)
+        xt = np.array([h[2] for h in hist], dtype=np.float32)
+
+        if len(hist) == 1:
+            return int(xb[-1]), int(xt[-1])
+        
+        pb = np.polyfit(idxs, xb, deg=1)
+        pt = np.polyfit(idxs, xt, deg=1)
+        x_bottom = int(np.poly1d(pb)(cur_idx))
+        x_top = int(np.poly1d(pt)(cur_idx))
+        return x_bottom, x_top
+
+    def update_and_impute(self, left_line, right_line, y_min: int, y_max: int, width: int):
+        cur_idx = self.frame_idx
+
+        if left_line is not None:
+            self.left_hist.append((cur_idx, left_line[0], left_line[2]))
+        if right_line is not None:
+            self.right_hist.append((cur_idx, right_line[0], right_line[2]))
+
+        def within_gap(hist):
+            return len(hist) > 0 and (cur_idx - hist[-1][0]) <= self.max_gap
+
+        if left_line is None and within_gap(self.left_hist):
+            pred = self._predict(self.left_hist, cur_idx)
+            if pred is not None:
+                xb, xt = pred
+                xb = max(0, min(width - 1, xb))
+                xt = max(0, min(width - 1, xt))
+                left_line = (xb, y_max, xt, y_min)
+
+        if right_line is None and within_gap(self.right_hist):
+            pred = self._predict(self.right_hist, cur_idx)
+            if pred is not None:
+                xb, xt = pred
+                xb = max(0, min(width - 1, xb))
+                xt = max(0, min(width - 1, xt))
+                right_line = (xb, y_max, xt, y_min)
+
+        self.frame_idx += 1
+        return left_line, right_line
+
+
+_LANE_IMPUTER = MissingLaneImputer(window=12, max_gap=6)

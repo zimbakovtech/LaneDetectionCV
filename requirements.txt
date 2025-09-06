@@ -7,3 +7,6 @@ jupyter
 scikit-learn
 tensorflow
 keras
+tqdm
+pillow
+opencv-python
