@@ -18,6 +18,21 @@ Open-source lane detection with two complementary approaches:
 - [License](#license)
 - [Authors](#authors)
 
+OpenCV:
+
+<div align="center">
+   <img src="results/images/OpenCV_Frame_1.jpg" alt="OpenCV Frame 1" width="32%" />
+   <img src="results/images/OpenCV_Frame_2.jpg" alt="OpenCV Frame 2" width="32%" />
+   <img src="results/images/OpenCV_Frame_3.jpg" alt="OpenCV Frame 3" width="32%" />
+  
+</div>
+
+U-Net:
+
+<div align="center">
+   <img src="results/images/U_Net_Frame.jpeg" alt="U-Net Frame" width="60%" />
+</div>
+
 ## Quick start
 
 1. **Install dependencies**
