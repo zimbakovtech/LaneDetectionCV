@@ -1,0 +1,16 @@
+{
+  "data_dir": "datasets",
+  "img_size": [
+    256,
+    512
+  ],
+  "batch_size": 4,
+  "epochs": 10,
+  "base_filters": 32,
+  "depth": 4,
+  "dropout": 0.0,
+  "use_bn": true,
+  "lr": 0.0001,
+  "norm_range": "0_1",
+  "best_model_path": "models\\best_model.h5"
+}

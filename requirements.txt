@@ -4,3 +4,9 @@ matplotlib
 moviepy
 scikit-image
 jupyter
+scikit-learn
+tensorflow
+keras
+tqdm
+pillow
+opencv-python
